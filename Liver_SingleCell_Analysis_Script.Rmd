@@ -1,0 +1,92 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+# Installation:
+install.packages("devtools","BiocManager")
+BiocManager::install("org.Hs.eg.db")
+devtools::install_github("BaderLab/scClustViz")
+devtools::install_github("BaderLab/HumanLiver")
+
+
+library(dplyr)
+library(grid)
+library(HumanLiver)
+library(ggplot2)
+library("tidyverse")
+library(scClustViz)
+```
+
+### From https://github.com/BaderLab/HumanLiver the data can be loaded by running the shinyapp ###
+```{r}
+viewHumanLiver()
+
+runShiny("path/to/file/HumanLiver.RData",
+         annotationDB="org.Hs.eg.db",
+         rownameKeytype="SYMBOL",
+         imageFileType="png")
+```
+
+### Visualisation for the publication ###
+```{r}
+#store the SeuratObject as a variable
+liv <- HumanLiverSeurat
+
+#They did tSNE dimension reduction in the MacParland et al., 2018, but we'll be performing UMAP dimension reduction. 40 dimensions were used making sure the entire variance of the data is captured in the dimension reduction. Visually inspected in the ElbowPlot.
+ElbowPlot(liv)
+liv <- RunUMAP(jens, dims = 1:40)
+
+#Include the cell type annotations from MacParland into the meta data
+liv[["old.ident"]] <- Idents(object = liv)
+cluster <- seq(1,20)
+cell_type <- c("Hepatocyte 1 (1)", "a/b T-cells 1 (2)", "Hepatocytes 2 (3)", "Inflammatory Macs (4)", "Hepatocytes 3 (5)", "Hepatocytes 4 (6)", "Plasma cells (7)", "NK-like cells (8)", "y/d T-cells 2 (9)", "Non-inflammatory Macs (10)", "Periportal LSECs (11)", "Central Venous LSECs (12)", "Portal endothelial cells (13)", "Hepatocytes 5 (14)", "Hepatocytes 6 (15)", "Mature B-cells (16)", "Cholangiocytes (17)", "y/d T-cells 2(18)", "Erythoid cells (19)", "Hepatic stellate cells (20)")
+
+#add the cell type for each cluster in the meta data
+liv@meta.data <- liv@meta.data %>%
+  mutate(cluster = case_when(
+    res.0.8 == 1 ~ cell_type[1],
+    res.0.8 == 2 ~ cell_type[2],
+    res.0.8 == 3 ~ cell_type[3],
+    res.0.8 == 4 ~ cell_type[4],
+    res.0.8 == 5 ~ cell_type[5],
+    res.0.8 == 6 ~ cell_type[6],
+    res.0.8 == 7 ~ cell_type[7],
+    res.0.8 == 8 ~ cell_type[8],
+    res.0.8 == 9 ~ cell_type[9],
+    res.0.8 == 10 ~ cell_type[10],
+    res.0.8 == 11 ~ cell_type[11],
+    res.0.8 == 12 ~ cell_type[12],
+    res.0.8 == 13 ~ cell_type[13],
+    res.0.8 == 14 ~ cell_type[14],
+    res.0.8 == 15 ~ cell_type[15],
+    res.0.8 == 16 ~ cell_type[16],
+    res.0.8 == 17 ~ cell_type[17],
+    res.0.8 == 18 ~ cell_type[18],
+    res.0.8 == 19 ~ cell_type[19],
+    res.0.8 == 20 ~ cell_type[20]
+    ))
+
+#Violin plot - making a violin plot of the GCGR expression across clusters. Finishing touches are done in Adobe Illustator. Log is set to True, due to the high range of the expression values, making the plot more easily interpretable. 
+VlnPlot(HumanLiverSeurat, group.by = "cluster", 'GCGR', log=T, sort = "increasing", pt.size = 2) + theme(legend.position = 'none', axis.title.x=element_blank())
+
+#Dimplot - making a dimplot w. cell type being annotated. Using both UMAP for the publication and tSNE to recreate the plot from the MacParland publication.
+DimPlot(liv, label = T, pt.size = 2, reduction = "umap") + NoLegend()
+DimPlot(liv, label = F, pt.size = 2, reduction = "umap") + NoLegend()
+DimPlot(liv, label = T, pt.size = 2, reduction = "tsne") + NoLegend()
+
+#Featureplot - making a featureplot of the GCGR expression in the data. max.cutoff was set to q75. Annotations of clusters are added in Adobe Illustrator
+feature_liver <- FeaturePlot(liv, reduction = "umap", features = c("GCGR"), max.cutoff = "q75", pt.size = 2, label = F)
+```
+
+### END OF VISUALISATION ###
+The following code chunk is used to produce the count table present in the publication.
+
+### COUNT TABLE ###
+```{r}
+counts <- group_by(jens@meta.data, cluster) %>% summarise(count = n()) %>% arrange(desc(count))
+
+write.table(counts, file="liver_counts", row.names = T, col.names = T)
+```
+

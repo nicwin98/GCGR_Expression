@@ -1,0 +1,111 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+```{r}
+library(Seurat)
+library(magrittr)
+library(harmony)
+library(dplyr)
+```
+The loading of the data is slightly altered compared to the Liao script. The original Liao script is:
+          K1.data <- Read10X(data.dir = "/staging/yuzhenyuan/kidney1/kidney1_result/outs/filtered_feature_bc_matrix")
+          K1 <- CreateSeuratObject(counts = K1.data, project = "kidney1", min.cells = 8, min.features = 200)
+          K2.data <- Read10X(data.dir = "/staging/yuzhenyuan/kidney2/combine/kidney2_result/outs/filtered_feature_bc_matrix")
+          K2 <- CreateSeuratObject(counts = K2.data, project = "kidney2", min.cells = 6, min.features = 200)
+          K3.data <- Read10X(data.dir = "/staging/yuzhenyuan/kidney3/kidney3_result/outs/filtered_feature_bc_matrix")
+          K3 <- CreateSeuratObject(counts = K3.data, project = "kidney3", min.cells = 10, min.features = 200)
+
+Due to the very low expression of GCGR in the data, it will be omitted by the 'min.cells' criteria. To be able to visualize the GCGR expression, 'min.cells' and 'min.features' were both set to 1. The following code chunk is copied from the Liao et al., 2020 script from their GitHub (https://github.com/lessonskit/Single-cell-RNA-sequencing-of-human-kidney/blob/master/Eliminating%20batch%20effects%20by%20another%20method%20%22fastMNN%22) although some things were omitted, as they were not relevant to our study. 
+```{r}
+#Kidney data loading 
+
+K1.data <- Read10X(data.dir = "/home/shr523/SC_liver_dall/GSE131685_RAW/Kidney_1/")
+K1 <- CreateSeuratObject(counts = K1.data, project = "kidney1", min.cells = 1, min.features = 1)
+K2.data <- Read10X(data.dir = "/home/shr523/SC_liver_dall/GSE131685_RAW/Kidney_2/")
+K2 <- CreateSeuratObject(counts = K2.data, project = "kidney2", min.cells = 1, min.features = 1)
+K3.data <- Read10X(data.dir = "/home/shr523/SC_liver_dall/GSE131685_RAW/Kidney_3/")
+K3 <- CreateSeuratObject(counts = K3.data, project = "kidney3", min.cells = 1, min.features = 1)
+kid <- merge(x = K1, y = list(K2, K3))
+
+#Quality control
+kid[["percent.mt"]] <- PercentageFeatureSet(kid, pattern = "^MT-")
+VlnPlot(kid, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+plot1 <- FeatureScatter(kid, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(kid, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+CombinePlots(plots = list(plot1, plot2))
+kid <- subset(kid, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 30) 
+kid <- NormalizeData(kid, normalization.method = "LogNormalize", scale.factor = 10000)
+kid <- NormalizeData(kid)
+kid <- FindVariableFeatures(kid, selection.method = "vst", nfeatures = 2000)
+top10 <- head(VariableFeatures(kid), 10)
+plot1 <- VariableFeaturePlot(kid)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+CombinePlots(plots = list(plot1, plot2))
+s.genes <-cc.genes$s.genes
+g2m.genes<-cc.genes$g2m.genes
+kid <- CellCycleScoring(kid, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+all.genes <- rownames(kid)
+kid <- ScaleData(kid, vars.to.regress = c("S.Score", "G2M.Score"), features = all.genes) #take long (1h)
+
+#Eliminate batch effects with harmony and cell classification
+kid <- RunPCA(kid, pc.genes = kid@var.genes, npcs = 20, verbose = FALSE)
+kid <- kid %>% 
+    RunHarmony("orig.ident", plot_convergence = TRUE)
+harmony_embeddings <- Embeddings(kid, 'harmony')
+harmony_embeddings[1:5, 1:5]
+kid <- kid %>% 
+    RunUMAP(reduction = "harmony", dims = 1:20) %>% 
+    FindNeighbors(reduction = "harmony", dims = 1:20) %>% 
+    FindClusters(resolution = 0.25) %>% 
+    identity()
+new.cluster.ids <- c(1, 2, 3, 4, 5, 6, 7,8,9, 10, 11)
+names(new.cluster.ids) <- levels(kid)
+
+kid <- RenameIdents(kid, new.cluster.ids)
+
+#Calculating differentially expressed genes (DEGs) and save rds file
+kid.markers <- FindAllMarkers(kid, only.pos = TRUE, min.pct = 0.25, thresh.use = 0.25)
+```
+### END OF LIAO ET AL. SCRIPT ###
+
+The analysis pipeline has been conducted according to the Liao script, the following code chunk is used to produce the plots of our publication.
+### VISUALISATION FOR PUBLICATION ###
+```{r}
+#Rename the clusters based on the annotations made in Liao et al., 2020
+kid_cell_types <- c("Tubule cells 1 (1)", "Tubule cells 2 (2)", "Tubule cells 3 (3)","Proximal straight tubule cells (4)", "NK-T cells (5)", "Glomerular parital epithelial cells (6)", "Monocytes (7)", "Distal tubule cells (8)", "Collecting duct principle cells (9)", "B cells (10)", "Collecting intercalated cells (11)")
+kid@meta.data <- kid@meta.data %>%
+  mutate(cluster = case_when(
+    RNA_snn_res.0.25 == 0 ~ kid_cell_types[1],
+    RNA_snn_res.0.25 == 1 ~ kid_cell_types[2],
+    RNA_snn_res.0.25 == 2 ~ kid_cell_types[3],
+    RNA_snn_res.0.25 == 3 ~ kid_cell_types[4],
+    RNA_snn_res.0.25 == 4 ~ kid_cell_types[5],
+    RNA_snn_res.0.25 == 5 ~ kid_cell_types[6],
+    RNA_snn_res.0.25 == 6 ~ kid_cell_types[7],
+    RNA_snn_res.0.25 == 7 ~ kid_cell_types[8],
+    RNA_snn_res.0.25 == 8 ~ kid_cell_types[9],
+    RNA_snn_res.0.25 == 9 ~ kid_cell_types[10],
+    RNA_snn_res.0.25 == 10 ~ kid_cell_types[11]
+    ))
+
+#Dimplot - making a dimplot w. cell type being annotated.
+DimPlot(kid, reduction = "umap", group.by = "cluster", label = F, pt.size = 2)
+
+#Featureplot - making a featureplot of the GCGR expression in the data. Annotations of clusters are added in Adobe Illustrator
+FeaturePlot(kid, features = c("GCGR"), pt.size = 2)
+
+#Violin plot - making a violin plot of the GCGR expression across clusters. Finishing touches are done in Adobe Illustrator.
+VlnPlot(kid, pt.size = 3, features = c("GCGR"), group.by ="cluster", sort = "increasing") + theme(legend.position = 'none', axis.title.x=element_blank())
+```
+
+### END OF VISUALISATION ###
+The following code chunk is useed to produce the count table present i our publication.
+### COUNT TABLE ###
+```{r}
+#Msake a matrix with the count of every cluster (cell type) in the data
+counts_kid <- group_by(kid@meta.data, cluster) %>% summarise(count = n()) %>% arrange(desc(count))
+
+#Export the table as a csv
+write.table(counts_kid, file="kid_counts", row.names = T, col.names = T)
+```
