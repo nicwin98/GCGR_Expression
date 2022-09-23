@@ -1,0 +1,242 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+#Data aquired from Azimuth (https://azimuth.hubmapconsortium.org/references/#Human%20-%20Pancreas) is loaded
+name = readRDS(file = "../shr523/enge.rds")
+
+#amount of mitochondrial genes are determined and visualised
+name <- PercentageFeatureSet(name, pattern = "^MT-", col.name = "percent.mt")
+
+VlnPlot(name, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, pt.size = 0)
+```
+
+
+```{r}
+#cells are quality controled using the specified restrictions
+name <- subset(name, subset = nFeature_RNA > quantile(name$nFeature_RNA,.01) & 
+                 nFeature_RNA < quantile(name$nFeature_RNA,.99) & 
+                 nCount_RNA < quantile(name$nCount_RNA,.99)) 
+                 #percent.mt < quantile(name$percent.mt, .95))
+
+#Potential mitochondrial and ribosomal genes are removed
+Mt <- grepl(rownames(name), pattern=("^MT-"))
+RP <- grepl(rownames(name), pattern=("^RP[SL]"))
+keep_genes <- rownames(name)[!(Mt+RP)]
+
+name@assays$RNA@counts <- name@assays$RNA@counts[keep_genes,]
+name@assays$RNA@data <- name@assays$RNA@data[keep_genes,]
+name@assays$RNA@meta.features <- name@assays$RNA@meta.features[keep_genes,]
+
+dim(name)
+
+rm(Mt, RP, keep_genes)
+
+dim(name)
+```
+
+
+### 3.2 Check the cell cycle noises
+```{r}
+#lists of cell cycle genes (both s-phase and g2m-phase) is loaded. Contact authors to acquire the specific list used.
+s.genes <- read.table("/home/kgr851/new_analysis_new_cc/cc/s.txt")
+g2m.genes <- read.table("/home/kgr851/new_analysis_new_cc/cc/g2m.txt")
+
+#the RDS object is normalized without taking cell cycle into consideration to see if cell cycle regression is needed determined by a PCA.
+name = SCTransform(name, verbose = FALSE, variable.features.n=2000, 
+                   vars.to.regress = c("nFeature_RNA", "nCount_RNA"))
+name <- RunPCA(name, features = c(s.genes$V1, g2m.genes$V1))
+DimPlot(name, reduction = "pca")
+#Clearly, there are cell cycle effects, so here we will regress them out
+```
+
+
+### 3.2 Regress out cell cycle noises together with seq depth varation**
+```{r}
+
+#Calculat the cell cycle scores
+name <- CellCycleScoring(name, s.features = s.genes$V1, g2m.features = g2m.genes$V1, set.ident = TRUE)
+
+#Normalize data taking the cell cycle phase into consideration
+DefaultAssay(name) <- "RNA"
+name = SCTransform(name, verbose = FALSE, variable.features.n=2000, 
+                   vars.to.regress = c("nFeature_RNA", "nCount_RNA", "S.Score", "G2M.Score"))
+
+#plot to see if the cell cycle noise have been diminished 
+name <- RunPCA(name, features = c(s.genes$V1, g2m.genes$V1))
+Idents(name) <- name$Phase
+DimPlot(name, reduction = "pca")
+```
+
+
+# 4. QC
+```{r}
+#Do PCA and UMAP reduction for data visualisation
+name <- RunPCA(name, features = name@assays$SCT@var.features, npcs=100)
+name <- RunUMAP(name, reduction = "pca", dims = 1:40, seed.use=888, repulsion.strength = 0.1, min.dist=0.5, n.neighbors = 30L, n.epochs = NULL)
+
+#Identify parameters for clustering
+res.range <- c(seq(0.05,1,0.05))
+assay <- "SCT"
+dims <- 20
+reduction <- "pca"
+
+#Defining a function, which clusters a RDS in a range of resolutions, and calculates both the silhouette score and the negative silhouette proportion to determine which resolution is optimal
+clusteringKit <- function(name, assay, dim, res.range, reduction){
+  DefaultAssay(name) <- assay
+  #using FindNeighbors (Seurat), a KNN based clustering algorithm, to compute a SNN graph, which then can be used to cluster the cells w. their neighbors
+  name <- FindNeighbors(name, dims=1:dim, reduction=reduction)
+  for (i in res.range){
+    #FindClusters is used to cluster the aforementioned SNN graph by optimising the modularity function. This is carried out for all resolutions in the range of interest.
+    name <- FindClusters(name, resolution=i)
+  }
+DefaultAssay(name) <- assay
+  dist.matrix <- dist(x = Embeddings(object = name[[reduction]])[, 1:dim])
+ clusters <- paste0(assay,"_snn_res.", res.range)
+  getSil <- function(clr) {
+    clr <- name@meta.data[[clr]]
+    sil <- cluster::silhouette(x = as.numeric(x = as.factor(x = clr)), dist = dist.matrix)
+    sil_value <- sil
+    return(sil_value)
+  }
+  sls <- lapply(clusters, getSil) #mc.cores = 1)
+  sls_median <- sapply(sls, function(x) median(x[,3])) %>% setNames(., res.range)
+  sls_neg_prop <- sapply(sls, function(x) sum(x[,3]<0)/length(x[,3])) %>% setNames(., res.range)
+  p_list <- lapply(res.range, function(res){
+    Idents(name) = name@meta.data[paste0(assay, "_snn_res.",res)]
+    DimPlot(name, reduction = "umap", label = TRUE, group.by = paste0(assay, "_snn_res.",res), pt.size =0.3, raster=F)
+  })
+  return(list(name=name, sls_median=sls_median, sls_neg_prop=sls_neg_prop, dimplots=p_list))
+}
+
+#update the RDS object
+clustered <- clusteringKit(name, assay="SCT", dim=30, res.range=seq(0.05, 3, 0.05), reduction="pca")
+name <- clustered$name
+
+#plot to find highest silhouette score w. low negative silhouette proportion
+plot(clustered$sls_media~seq(0.05, 3, 0.05), type="l", ylab = "Silhouette score") + plot(clustered$sls_neg_prop~seq(0.05, 3, 0.05), type="l", ylab = "Negative silhouette proportion")
+
+#resolution of 0.3-0.4 looks to havee high silhouette and low negative silhouette score. These are inspected by doing DimPlots
+DimPlot(name, reduction = "umap", label = T, group.by = "SCT_snn_res.0.25", pt.size =3, raster=F, label.size = 7, label.box = T, repel = T)
+DimPlot(name, reduction = "umap", label = T, group.by = "SCT_snn_res.0.3", pt.size =3, raster=F, label.size = 7, label.box = T, repel = T)
+DimPlot(name, reduction = "umap", label = T, group.by = "SCT_snn_res.0.35", pt.size =3, raster=F, label.size = 7, label.box = T, repel = T)
+DimPlot(name, reduction = "umap", label = T, group.by = "SCT_snn_res.0.4", pt.size =3, raster=F, label.size = 7, label.box = T, repel = T)
+
+
+#A resolution of 0.3 is deemed optimal
+```
+
+##DEG analysis ###
+```{r}
+#Idents are changed to the optimal resolution determined above.
+Idents(name) <- "SCT_snn_res.0.3"
+# find markers for every cluster compared to all remaining cells, report only the positive ones
+name_markers_0.3 <- FindAllMarkers(name, min.pct = 0.1, logfc.threshold = 0.5, only.pos = T)
+
+
+#Use this line to brows DEG of different clusters e.g. GCG 
+name_markers_0.3 %>% filter(gene == "GCG")
+```
+
+
+
+```{r}
+#The expression of markers indicative of different cell types are explored in the data set, and the clustered are annotated accordingly. The ket markers were obtained from Azimuth (https://azimuth.hubmapconsortium.org/references/#Human%20-%20Pancreas)
+
+#Beta cells
+FeaturePlot(name,
+            reduction = "umap",
+            features = c("IAPP", "INS", "DLK1"),
+            pt.size = 1, keep.scale = "feature",
+            label=F, ncol=3) & NoLegend()
+
+#alpha cells
+FeaturePlot(name,
+            reduction = "umap",
+            features = c("GCG", "TTR", "PPP1R1A"),
+            pt.size = 1, keep.scale = "feature",
+            label=F, ncol=3) & NoLegend()
+
+
+#delta cells
+FeaturePlot(name,
+            reduction = "umap",
+            features = c("SST", "RBP4", "SERPINA1"),
+            pt.size = 1, keep.scale = "feature",
+            label=F, ncol=3) & NoLegend()
+
+#ductal cells
+FeaturePlot(name,
+            reduction = "umap",
+            features = c("SPP1", "MMP7", "IGFBP7"),
+            pt.size = 1, keep.scale = "feature",
+            label=F, ncol=3) & NoLegend()
+
+
+#ductal cells
+FeaturePlot(name,
+            reduction = "umap",
+            features = c("SPP1", "MMP7", "IGFBP7"),
+            pt.size = 1, keep.scale = "feature",
+            label=F, ncol=3) & NoLegend()
+
+#mesenchymal cells
+FeaturePlot(name,
+            reduction = "umap",
+            features = c("THY1"),
+            pt.size = 1, keep.scale = "feature",
+            label=F, ncol=1) & NoLegend()
+
+#acinar cells
+FeaturePlot(name,
+            reduction = "umap",
+            features = c("REG1A", "PRSS1", "CTRB2"),
+            pt.size = 1, keep.scale = "feature",
+            label=F, ncol=3) & NoLegend()
+
+#The cell type for each cluster is added in the meta data
+name@meta.data <- name@meta.data %>%
+  mutate(cluster = case_when(
+    SCT_snn_res.0.3 == 0 ~ "alpha cells (1)",
+    SCT_snn_res.0.3 == 1 ~ "beta cells (1)",
+    SCT_snn_res.0.3 == 2 ~ "acinar cells (1)",
+    SCT_snn_res.0.3 == 3 ~ "alpha cells (2)",
+    SCT_snn_res.0.3 == 4 ~ "ductal cells (1)",
+    SCT_snn_res.0.3 == 5 ~ "ductal cells (2)",
+    SCT_snn_res.0.3 == 6 ~ "alpha cells (3)",
+    SCT_snn_res.0.3 == 7 ~ "alpha cells (4)",
+    SCT_snn_res.0.3 == 8 ~ "beta cells (2)",
+    SCT_snn_res.0.3 == 9 ~ "delta cells",
+    SCT_snn_res.0.3 == 10 ~ "alpha cells (5)",
+    SCT_snn_res.0.3 == 11 ~ "acinar cells (2)",
+    SCT_snn_res.0.3 == 12 ~ "mesenchymal cells",
+    SCT_snn_res.0.3 == 13 ~ "alpha cells (6)",
+    SCT_snn_res.0.3 == 14 ~ "acinar cells (3)",
+    SCT_snn_res.0.3 == 15 ~ "alpha cells (7)",
+    SCT_snn_res.0.3 == 16 ~ "ductal cells (3)"
+    ))
+
+
+#Data is visualised either with or without labels 
+DimPlot(name, reduction = "umap", label =T, pt.size = 3, label.size = 5, group.by = "cluster", repel = T)+ theme(legend.position = 'none', axis.title.x=element_blank())
+DimPlot(name, reduction = "umap", label =T, pt.size = 3, label.size = 5, repel = T)+ theme(legend.position = 'none', axis.title.x=element_blank())
+
+#Expression of GCGR in the data set is visualsed in a FeaturePlot and ViolinPlot
+FeaturePlot(name,
+            reduction = "umap",
+            features = c("GCGR"),
+            pt.size = 3, keep.scale = "feature",max.cutoff = 0.9,
+            label=F, ncol=1) & NoLegend()
+
+VlnPlot(name, group.by = "cluster", 'GCGR', log=T, sort = "increasing", pt.size = 2) + theme(legend.position = 'none', axis.title.x=element_blank())
+```
+
+
+
+
